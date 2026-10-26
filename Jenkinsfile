@@ -1,9 +1,9 @@
 pipeline {
     agent { label 'Jenkins-Agent' }
     tools {
-        jdk 'Java17'
-        maven 'Mavenlatest'
-    }
+    jdk 'java17'
+    maven 'mavenlatest'
+}
     environment {
 	    APP_NAME = "register-app-pipeline"
             RELEASE = "1.0.0"
@@ -54,7 +54,7 @@ pipeline {
                script {
                     waitForQualityGate abortPipeline: false, credentialsId: 'jenkins-sonarqube-token'
                 }	
-            }
+           }
 
         }
 
