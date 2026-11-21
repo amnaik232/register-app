@@ -1,0 +1,7 @@
+.git
+target
+server/target
+webapp/target
+k8s
+Jenkinsfile
+trivy-report.txt
