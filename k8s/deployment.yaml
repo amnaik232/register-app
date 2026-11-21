@@ -16,6 +16,6 @@ spec:
     spec:
       containers:
         - name: register-app
-          image: mangtha/register-app:34
+          image: mangtha/register-app:35
           ports:
             - containerPort: 8080
