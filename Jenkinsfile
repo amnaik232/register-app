@@ -1,115 +1,96 @@
 pipeline {
     agent any
+
     tools {
-    jdk 'java17'
-    maven 'mavenlatest'
-}
-    environment {
-	    APP_NAME = "register-app-pipeline"
-            RELEASE = "1.0.0"
-            DOCKER_USER = "ashfaque9x"
-            DOCKER_PASS = 'dockerhub'
-            IMAGE_NAME = "${DOCKER_USER}" + "/" + "${APP_NAME}"
-            IMAGE_TAG = "${RELEASE}-${BUILD_NUMBER}"
-	    JENKINS_API_TOKEN = credentials("JENKINS_API_TOKEN")
+        maven 'maven3'
+        jdk 'java 17'
     }
-    stages{
-        stage("Cleanup Workspace"){
-                steps {
+
+    environment {
+        DOCKER_IMAGE = "mangtha/register-app"
+        IMAGE_TAG    = "${env.BUILD_NUMBER}"
+    }
+
+    stages {
+        stage('clean work space') {
+            steps {
                 cleanWs()
-                }
-        }
-
-        stage("Checkout from SCM"){
-                steps {
-                    git branch: 'main', credentialsId: 'github', url: 'https://github.com/Ashfaque-9x/register-app'
-                }
-        }
-
-        stage("Build Application"){
-            steps {
-                sh "mvn clean package"
             }
-
-       }
-
-       stage("Test Application"){
-           steps {
-                 sh "mvn test"
-           }
-       }
-
-       stage("SonarQube Analysis"){
-           steps {
-	           script {
-		        withSonarQubeEnv(credentialsId: 'jenkins-sonarqube-token') { 
-                        sh "mvn sonar:sonar"
-		        }
-	           }	
-           }
-       }
-
-       stage("Quality Gate"){
-           steps {
-               script {
-                    waitForQualityGate abortPipeline: false, credentialsId: 'jenkins-sonarqube-token'
-                }	
-           }
-
         }
-
-        stage("Build & Push Docker Image") {
+        stage('checkout from scm') {
             steps {
-                script {
-                    docker.withRegistry('',DOCKER_PASS) {
-                        docker_image = docker.build "${IMAGE_NAME}"
-                    }
-
-                    docker.withRegistry('',DOCKER_PASS) {
-                        docker_image.push("${IMAGE_TAG}")
-                        docker_image.push('latest')
-                    }
+                git branch: 'main', credentialsId: 'github', url: 'https://github.com/amnaik232/register-app.git'
+            }
+        }
+        stage('build application') {
+            steps {
+                sh 'mvn clean package'
+            }
+        }
+        stage('test application') {
+            steps {
+                sh 'mvn test'
+            }
+        }
+        stage('sonarqube') {
+            steps {
+                withSonarQubeEnv(installationName: 'sonarqube', credentialsId: 'jenkinssonarqubetoken') {
+                    sh 'mvn org.sonarsource.scanner.maven:sonar-maven-plugin:sonar'
                 }
             }
-
-       }
-
-       stage("Trivy Scan") {
-           steps {
-               script {
-	            sh ('docker run -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy image ashfaque9x/register-app-pipeline:latest --no-progress --scanners vuln  --exit-code 0 --severity HIGH,CRITICAL --format table')
-               }
-           }
-       }
-
-       stage ('Cleanup Artifacts') {
-           steps {
-               script {
-                    sh "docker rmi ${IMAGE_NAME}:${IMAGE_TAG}"
-                    sh "docker rmi ${IMAGE_NAME}:latest"
-               }
-          }
-       }
-
-       stage("Trigger CD Pipeline") {
+        }
+        stage('Quality Gate') {
             steps {
-                script {
-                    sh "curl -v -k --user clouduser:${JENKINS_API_TOKEN} -X POST -H 'cache-control: no-cache' -H 'content-type: application/x-www-form-urlencoded' --data 'IMAGE_TAG=${IMAGE_TAG}' 'ec2-13-232-128-192.ap-south-1.compute.amazonaws.com:8080/job/gitops-register-app-cd/buildWithParameters?token=gitops-token'"
+                timeout(time: 5, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
                 }
             }
-       }
+        }
+        stage('Docker Build') {
+            steps {
+                sh 'docker build -t $DOCKER_IMAGE:$IMAGE_TAG -t $DOCKER_IMAGE:latest .'
+            }
+        }
+        stage('Trivy Image Scan') {
+            steps {
+                sh '''
+                    mkdir -p /home/ubuntu/trivy-tmp /home/ubuntu/trivy-cache
+                    TMPDIR=/home/ubuntu/trivy-tmp trivy image --cache-dir /home/ubuntu/trivy-cache --severity HIGH,CRITICAL --exit-code 0 --format table -o trivy-report.txt $DOCKER_IMAGE:$IMAGE_TAG
+                    cat trivy-report.txt
+                '''
+            }
+        }
+        stage('Docker Push') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'dockerpassword', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                    sh '''
+                        echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+                        docker push $DOCKER_IMAGE:$IMAGE_TAG
+                        docker push $DOCKER_IMAGE:latest
+                        docker logout
+                    '''
+                }
+            }
+        }
+        stage('Update K8s Manifest') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'github', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_TOKEN')]) {
+                    sh '''
+                        git config user.name "jenkins"
+                        git config user.email "jenkins@ci.local"
+                        sed -i "s|image: mangtha/register-app:.*|image: ${DOCKER_IMAGE}:${IMAGE_TAG}|g" k8s/deployment.yaml
+                        git add k8s/deployment.yaml
+                        git diff --cached --quiet || git commit -m "Update image tag to ${IMAGE_TAG} [skip ci]"
+                        git push https://${GIT_USER}:${GIT_TOKEN}@github.com/amnaik232/register-app.git HEAD:main
+                    '''
+                }
+            }
+        }
     }
 
     post {
-       failure {
-             emailext body: '''${SCRIPT, template="groovy-html.template"}''', 
-                      subject: "${env.JOB_NAME} - Build # ${env.BUILD_NUMBER} - Failed", 
-                      mimeType: 'text/html',to: "ashfaque.s510@gmail.com"
-      }
-      success {
-            emailext body: '''${SCRIPT, template="groovy-html.template"}''', 
-                     subject: "${env.JOB_NAME} - Build # ${env.BUILD_NUMBER} - Successful", 
-                     mimeType: 'text/html',to: "ashfaque.s510@gmail.com"
-      }      
-   }
+        always {
+            archiveArtifacts artifacts: 'trivy-report.txt', allowEmptyArchive: true
+        }
+    }
 }
