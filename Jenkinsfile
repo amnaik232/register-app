@@ -8,7 +8,8 @@ pipeline {
 
     environment {
         DOCKER_IMAGE = "mangtha/register-app"
-        IMAGE_TAG    = "${env.BUILD_NUMBER}"
+        RELEASE      = "1.0.0"
+        IMAGE_TAG    = "${RELEASE}-${env.BUILD_NUMBER}"
     }
 
     stages {
@@ -22,14 +23,20 @@ pipeline {
                 git branch: 'main', credentialsId: 'github', url: 'https://github.com/amnaik232/register-app.git'
             }
         }
-        stage('build application') {
+        stage('Check Skip CI') {
             steps {
-                sh 'mvn clean package'
+                script {
+                    def commitMsg = sh(script: 'git log -1 --pretty=%B', returnStdout: true).trim()
+                    if (commitMsg.contains('[skip ci]')) {
+                        currentBuild.result = 'ABORTED'
+                        error('Skipping build triggered by manifest update.')
+                    }
+                }
             }
         }
-        stage('test application') {
+        stage('Build & Test (for SonarQube)') {
             steps {
-                sh 'mvn test'
+                sh 'mvn clean test'
             }
         }
         stage('sonarqube') {
@@ -46,7 +53,7 @@ pipeline {
                 }
             }
         }
-        stage('Docker Build') {
+        stage('Docker Multi-Stage Build') {
             steps {
                 sh 'docker build -t $DOCKER_IMAGE:$IMAGE_TAG -t $DOCKER_IMAGE:latest .'
             }
@@ -72,6 +79,16 @@ pipeline {
                 }
             }
         }
+        stage('Disk Cleanup') {
+            steps {
+                sh '''
+                    docker rmi -f $DOCKER_IMAGE:$IMAGE_TAG || true
+                    docker rmi -f $DOCKER_IMAGE:latest || true
+                    docker image prune -f
+                    docker builder prune -f
+                '''
+            }
+        }
         stage('Update K8s Manifest') {
             steps {
                 withCredentials([usernamePassword(credentialsId: 'github', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_TOKEN')]) {
@@ -91,6 +108,7 @@ pipeline {
     post {
         always {
             archiveArtifacts artifacts: 'trivy-report.txt', allowEmptyArchive: true
+            cleanWs()
         }
     }
 }
